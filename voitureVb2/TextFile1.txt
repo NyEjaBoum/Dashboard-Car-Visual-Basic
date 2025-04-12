@@ -1,0 +1,540 @@
+﻿Imports MySql.Data.MySqlClient
+Imports System.Threading
+Imports System.Diagnostics
+Imports System.Windows.Forms.VisualStyles.VisualStyleElement
+
+Public Class Form1
+    Private conn As Connexion
+    Private voitures As List(Of Voiture)
+    Public voituresSelectionne As Voiture
+
+    ' Variables ajoutées depuis le code C++
+    Private spacePressed As Boolean = False
+    Private controlPressed As Boolean = False
+    Private lastTime As DateTime = DateTime.Now
+    Private chronoClock As New Stopwatch()
+    Private isPressed(10) As Boolean ' Pour les touches numériques 0-9 et A
+    Private isSelecting As Boolean = True
+    Private selectedIndex As Integer = 0
+
+    ' Contrôles UI pour la simulation
+    Private WithEvents vitesseLabel As Label
+    Private WithEvents chronoLabel As Label
+    Private WithEvents essenceLabel As Label
+    Private WithEvents distanceLabel As Label
+    'Private WithEvents replayButton As Button
+
+    ' Timers pour la mise à jour
+    Private WithEvents simulationTimer As System.Windows.Forms.Timer
+    Private Sub Form1_Load(sender As Object, e As EventArgs) Handles MyBase.Load
+        Me.KeyPreview = True ' Pour capter les événements clavier
+        Me.AcceptButton = Nothing ' Désactive le bouton par défaut
+        Console.WriteLine("AcceptButton désactivé")
+        conn = New Connexion("root", "", "voiture", "localhost", 3306)
+        If Not conn.Connecter() Then
+            MessageBox.Show("Échec de la connexion à la base de données.")
+            Return
+        End If
+
+        Panel1.Visible = True
+        Panel2.Visible = False
+
+        ' Initialiser les contrôles supplémentaires
+        InitializeSimulationControls()
+
+        ' Charger les voitures
+        chargerVoituresDansComboBox()
+
+        ' Configurer le timer de simulation
+        simulationTimer = New System.Windows.Forms.Timer()
+        simulationTimer.Interval = 16 ' ~60 FPS pour la mise à jour
+        AddHandler simulationTimer.Tick, AddressOf OnSimulationTick
+    End Sub
+
+    Private Sub InitializeSimulationControls()
+        ' Créer les contrôles pour l'affichage des données de simulation
+        vitesseLabel = New Label()
+        vitesseLabel.AutoSize = True
+        vitesseLabel.Font = New Font("Arial", 12, FontStyle.Bold)
+        vitesseLabel.Location = New Point(300, 30)
+        Me.Panel2.Controls.Add(vitesseLabel)
+
+        chronoLabel = New Label()
+        chronoLabel.AutoSize = True
+        chronoLabel.Font = New Font("Arial", 12, FontStyle.Regular)
+        chronoLabel.Location = New Point(300, 60)
+        Me.Panel2.Controls.Add(chronoLabel)
+
+        essenceLabel = New Label()
+        essenceLabel.AutoSize = True
+        essenceLabel.Font = New Font("Arial", 12, FontStyle.Regular)
+        essenceLabel.Location = New Point(300, 90)
+        Me.Panel2.Controls.Add(essenceLabel)
+
+        distanceLabel = New Label()
+        distanceLabel.AutoSize = True
+        distanceLabel.Font = New Font("Arial", 12, FontStyle.Regular)
+        distanceLabel.Location = New Point(300, 120)
+        Me.Panel2.Controls.Add(distanceLabel)
+
+        'replayButton = New Button()
+        'replayButton.Text = "Replay"
+        'replayButton.Size = New Size(120, 40)
+        'replayButton.Location = New Point(500, 30)
+        'replayButton.BackColor = Color.Blue
+        'replayButton.ForeColor = Color.White
+        'replayButton.Enabled = False ' Désactive le bouton Replay pendant l'accélération
+        'AddHandler replayButton.Click, AddressOf ReplayButton_Click
+        'Me.Panel2.Controls.Add(replayButton)
+    End Sub
+
+    Private Sub chargerVoituresDansComboBox()
+        voitures = Voiture.GetAll(conn)
+        ComboBox1.Items.Clear()
+        ComboBox1.DataSource = voitures
+        ComboBox1.DisplayMember = "Nom"
+        ComboBox1.ValueMember = "Id"
+        If ComboBox1.Items.Count > 0 Then ComboBox1.SelectedIndex = 0
+    End Sub
+
+    Private Sub Form1_FormClosing(sender As Object, e As FormClosingEventArgs) Handles MyBase.FormClosing
+        If conn IsNot Nothing Then conn.CloseConnection()
+    End Sub
+
+    Private Sub choixVoiture(sender As Object, e As EventArgs) Handles Button1.Click
+        If ComboBox1.SelectedItem IsNot Nothing Then
+            Dim selectedId As Integer = ComboBox1.SelectedValue
+            voituresSelectionne = Voiture.GetById(conn, selectedId)
+
+            If voituresSelectionne IsNot Nothing Then
+                Panel2.Visible = True
+                isSelecting = False
+                simulationTimer.Start()
+
+                ' Mettre à jour l'interface
+                UpdateUI()
+
+                MessageBox.Show($"Voiture sélectionnée : {voituresSelectionne.Nom}" & vbCrLf &
+                              $"ID : {voituresSelectionne.Id}" & vbCrLf &
+                              $"Vitesse : {voituresSelectionne.Vitesse} km/h" & vbCrLf &
+                              $"Essence : {voituresSelectionne.NiveauEssence:F2}/{voituresSelectionne.CapaciteReservoir} L")
+                Button1.Enabled = False ' Désactive le bouton après la sélection
+            Else
+                MessageBox.Show("Aucune voiture trouvée avec cet ID.")
+            End If
+        Else
+            MessageBox.Show("Veuillez sélectionner une voiture dans la liste.")
+        End If
+    End Sub
+
+    Private Sub pictureBoxSpeed_Paint(sender As Object, e As PaintEventArgs) Handles pictureBoxSpeed.Paint
+        Dim g = e.Graphics
+        g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
+        Dim centerX As Integer = pictureBoxSpeed.Width / 2
+        Dim centerY As Integer = pictureBoxSpeed.Height / 2
+        Dim radius = Math.Min(centerX, centerY) - 20
+
+        ' Fond avec dégradé
+        Using brush As New Drawing2D.LinearGradientBrush(pictureBoxSpeed.ClientRectangle, Color.LightGray, Color.White, 45)
+            g.FillEllipse(brush, centerX - radius, centerY - radius, radius * 2, radius * 2)
+        End Using
+        g.DrawEllipse(New Pen(Color.DarkGray, 2), centerX - radius, centerY - radius, radius * 2, radius * 2)
+
+        ' Graduations et chiffres (0 à 240 km/h comme dans le code C++)
+        For i = 0 To 240 Step 20
+            Dim angle = i / 240 * 180 - 90
+            Dim rad = angle * Math.PI / 180
+            Dim x1 As Single = centerX + radius * 0.85 * Math.Cos(rad)
+            Dim y1 As Single = centerY + radius * 0.85 * Math.Sin(rad)
+            Dim x2 As Single = centerX + radius * Math.Cos(rad)
+            Dim y2 As Single = centerY + radius * Math.Sin(rad)
+            g.DrawLine(Pens.DarkGray, x1, y1, x2, y2)
+
+            If i Mod 40 = 0 Then
+                Dim textX As Single = centerX + radius * 1.1 * Math.Cos(rad) - 10
+                Dim textY As Single = centerY + radius * 1.1 * Math.Sin(rad) - 5
+                g.DrawString(i.ToString, New Font("Arial", 10, FontStyle.Bold), Brushes.Black, textX, textY)
+            End If
+        Next
+
+        ' Dessiner l'aiguille directement ici si une voiture est sélectionnée
+        If voituresSelectionne IsNot Nothing Then
+            Dim speed = voituresSelectionne.Vitesse
+            If speed > 240 Then speed = 240
+            If speed < 0 Then speed = 0
+
+            Dim angle = speed / 240 * 180 - 90
+            Dim rad = angle * Math.PI / 180
+            Dim x As Single = centerX + radius * 0.8 * Math.Cos(rad)
+            Dim y As Single = centerY + radius * 0.8 * Math.Sin(rad)
+            g.DrawLine(New Pen(Color.Red, 3), centerX, centerY, x, y)
+        End If
+    End Sub
+
+    Private Sub DrawSpeedNeedle(speed As Double)
+        ' Invalider pour redessiner tout, y compris l'aiguille
+        pictureBoxSpeed.Invalidate()
+    End Sub
+
+    Private Sub pictureBoxFuel_Paint(sender As Object, e As PaintEventArgs) Handles pictureBoxFuel.Paint
+        Dim g = e.Graphics
+        g.SmoothingMode = Drawing2D.SmoothingMode.AntiAlias
+        Dim width = pictureBoxFuel.Width - 40 ' Plus d'espace pour les étiquettes
+        Dim height = pictureBoxFuel.Height - 20
+        Dim x = 30 ' Décalage pour laisser de la place aux étiquettes
+        Dim y = 10
+
+        ' Fond gris clair
+        g.FillRectangle(Brushes.LightGray, x, y, width, height)
+        g.DrawRectangle(New Pen(Color.DarkGray, 2), x, y, width, height)
+
+        ' Graduations (0%, 25%, 50%, 75%, 100%)
+        For i = 0 To 100 Step 25
+            Dim yGrad As Single = y + height * (1 - i / 100)
+            g.DrawLine(Pens.Black, x - 5, yGrad, x, yGrad)
+            g.DrawString($"{i}%", New Font("Arial", 8), Brushes.Black, x - 25, yGrad - 5)
+        Next
+
+        ' Étiquettes E et F
+        g.DrawString("E", New Font("Arial", 10, FontStyle.Bold), Brushes.Black, x - 25, y + height - 5)
+        g.DrawString("F", New Font("Arial", 10, FontStyle.Bold), Brushes.Black, x - 25, y - 5)
+
+        ' Dessiner le remplissage directement ici si une voiture est sélectionnée
+        If voituresSelectionne IsNot Nothing Then
+            Dim fuelPercent = voituresSelectionne.NiveauEssence / voituresSelectionne.CapaciteReservoir * 100
+            If fuelPercent > 100 Then fuelPercent = 100
+            If fuelPercent < 0 Then fuelPercent = 0
+
+            ' Choix de la couleur selon le niveau
+            Dim fillColor As Brush
+            If fuelPercent > 50 Then
+                fillColor = Brushes.Green
+            ElseIf fuelPercent > 20 Then
+                fillColor = Brushes.Yellow
+            Else
+                fillColor = Brushes.Red
+            End If
+
+            ' Remplissage proportionnel
+            Dim fillHeight As Single = height * (fuelPercent / 100)
+            Dim fillY = y + height - fillHeight
+            g.FillRectangle(fillColor, x + 2, fillY, width - 4, fillHeight)
+        End If
+    End Sub
+
+    Private Sub DrawFuelGauge(fuelPercent As Double)
+        ' Invalider pour redessiner tout, y compris le remplissage
+        pictureBoxFuel.Invalidate()
+    End Sub
+
+    ' Méthode appelée par le timer de simulation
+    Private Sub OnSimulationTick(sender As Object, e As EventArgs)
+        Dim deltaTime As Single = GetDeltaTime()
+        'HandleInput(deltaTime)
+        UpdateUI()
+    End Sub
+
+    ' Récupérer le temps écoulé depuis la dernière mise à jour
+    Private Function GetDeltaTime() As Single
+        Dim now As DateTime = DateTime.Now
+        Dim elapsed As TimeSpan = now - lastTime
+        lastTime = now
+        Return CSng(elapsed.TotalSeconds)
+    End Function
+
+    ' Méthode pour mettre à jour l'interface utilisateur
+    Private Sub UpdateUI()
+        If voituresSelectionne IsNot Nothing Then
+            ' Mettre à jour les informations de la voiture
+            vitesseLabel.Text = $"Vitesse : {voituresSelectionne.Vitesse:F2} km/h"
+
+            Dim pressedDuration As Single = CSng(chronoClock.Elapsed.TotalSeconds)
+            Dim minutes As Integer = CInt(pressedDuration) \ 60
+            Dim seconds As Integer = CInt(pressedDuration) Mod 60
+            chronoLabel.Text = $"Temps: {minutes}m {seconds}s"
+
+            Dim niveau As Double = voituresSelectionne.NiveauEssence
+            Dim capaciteMax As Double = voituresSelectionne.CapaciteReservoir
+            essenceLabel.Text = $"Essence: {niveau:F2}L / {capaciteMax:F2}L"
+
+            distanceLabel.Text = $"Distance: {voituresSelectionne.DistanceParcourue:F2} m"
+
+            ' Mettre à jour les jauges
+            DrawSpeedNeedle(voituresSelectionne.Vitesse)
+            DrawFuelGauge(niveau / capaciteMax * 100)
+        End If
+    End Sub
+
+    Private Sub Form1_KeyDown(sender As Object, e As KeyEventArgs) Handles MyBase.KeyDown
+        If isSelecting OrElse voituresSelectionne Is Nothing Then Return
+        Dim deltaTime As Single = GetDeltaTime()
+
+        Dim now As DateTime = DateTime.Now
+        Dim heure As String = $"{now:HH:mm:ss.fff}"
+        Dim toucheNumeriquePressee As Boolean = False
+        Dim accelPourcent As Double = 0
+        Dim accelle As Double = 0
+
+        ' Tableau des touches et pourcentages comme dans le C++
+        Dim touches() As Keys = {Keys.D1, Keys.D2, Keys.D3, Keys.D4, Keys.D5, Keys.D6, Keys.D7, Keys.D8, Keys.D9, Keys.D0, Keys.A}
+        Dim pourcentages() As Double = {0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0, 1.0}
+
+        ' Gérer la touche Espace
+        If e.KeyCode = Keys.Space Then
+            If Not spacePressed Then
+                spacePressed = True
+                Console.WriteLine("Space key pressed")
+                If toucheNumeriquePressee Then
+                    chronoClock.Restart()
+                    accelle = voituresSelectionne.Accel * accelPourcent
+                End If
+
+                If voituresSelectionne.NiveauEssence > 0 Then
+                    voituresSelectionne.Acceleration(deltaTime, accelPourcent)
+                    voituresSelectionne.ConsommerEssence(deltaTime, accelPourcent)
+                End If
+            End If
+        End If
+
+        ' Gérer les touches numériques et A
+        For i As Integer = 0 To 10
+            If e.KeyCode = touches(i) Then
+                toucheNumeriquePressee = True
+                accelPourcent = pourcentages(i)
+
+                ' Si la touche n'était pas déjà pressée et que Espace est enfoncé
+                If Not isPressed(i) AndAlso spacePressed Then
+                    isPressed(i) = True
+                    Console.WriteLine($"Key {If(i = 10, "A", i + 1)} pressed at {heure}")
+
+                    ' Démarrer le chronomètre si ce n'est pas déjà fait
+                    If Not chronoClock.IsRunning Then
+                        chronoClock.Restart()
+                        Console.WriteLine($"Chrono started at {heure}")
+                    End If
+
+                    ' Insérer dans le log pour cette nouvelle touche
+                    Acceleration_Log.Create(conn, voituresSelectionne.Id, voituresSelectionne.Vitesse,
+                                    voituresSelectionne.Accel * accelPourcent, heure)
+                End If
+
+                ' Gérer la décélération si Ctrl est enfoncé
+                If Not isPressed(i) AndAlso controlPressed Then
+                    isPressed(i) = True
+                    Acceleration_Log.Create(conn, voituresSelectionne.Id, voituresSelectionne.Vitesse,
+                                    -voituresSelectionne.Dec * accelPourcent, heure)
+                End If
+
+                Exit For
+            End If
+        Next
+
+        ' Mise à jour de la distance parcourue
+        voituresSelectionne.CalculDistanceParcouru(deltaTime, accelle)
+
+        ' Gérer la touche Ctrl pour la décélération
+        If e.KeyCode = Keys.ControlKey OrElse e.KeyCode = Keys.LControlKey OrElse e.KeyCode = Keys.RControlKey Then
+            If Not controlPressed AndAlso toucheNumeriquePressee Then
+                chronoClock.Restart()
+                controlPressed = True
+
+                If voituresSelectionne.Vitesse > 0 AndAlso toucheNumeriquePressee AndAlso voituresSelectionne.NiveauEssence > 0 Then
+                    voituresSelectionne.Decceleration(deltaTime, accelPourcent)
+                End If
+            End If
+        End If
+    End Sub
+
+    Private Sub Form1_KeyUp(sender As Object, e As KeyEventArgs) Handles MyBase.KeyUp
+        If isSelecting OrElse voituresSelectionne Is Nothing Then Return
+
+        Dim now As DateTime = DateTime.Now
+        Dim heure As String = $"{now:HH:mm:ss.fff}"
+
+        ' Relâchement des touches numériques et A
+        Dim touches() As Keys = {Keys.D1, Keys.D2, Keys.D3, Keys.D4, Keys.D5, Keys.D6, Keys.D7, Keys.D8, Keys.D9, Keys.D0, Keys.A}
+        For i As Integer = 0 To 10
+            If e.KeyCode = touches(i) Then
+                isPressed(i) = False
+                Console.WriteLine($"Key {If(i = 10, "A", i + 1)} released")
+                Exit For
+            End If
+        Next
+
+        ' Relâchement de la touche Espace
+        If e.KeyCode = Keys.Space AndAlso spacePressed Then
+            spacePressed = False
+            If chronoClock.IsRunning Then
+                Dim pressedDuration As Single = CSng(chronoClock.Elapsed.TotalSeconds)
+                Console.WriteLine($"Space key released at {heure}")
+                Console.WriteLine($"Pressed duration: {pressedDuration} seconds")
+                Console.WriteLine($"Distance parcourue: {voituresSelectionne.DistanceParcourue} m")
+
+                ' Insérer une entrée avec accélération 0
+                Acceleration_Log.Create(conn, voituresSelectionne.Id, voituresSelectionne.Vitesse, 0, heure)
+                chronoClock.Stop()
+            End If
+        End If
+
+        ' Relâchement de la touche Ctrl
+        If (e.KeyCode = Keys.ControlKey OrElse e.KeyCode = Keys.LControlKey OrElse e.KeyCode = Keys.RControlKey) AndAlso controlPressed Then
+            controlPressed = False
+            If chronoClock.IsRunning Then
+                Dim pressedDuration As Single = CSng(chronoClock.Elapsed.TotalSeconds)
+                Acceleration_Log.Create(conn, voituresSelectionne.Id, voituresSelectionne.Vitesse, 0, heure)
+                Console.WriteLine($"Touche Ctrl relâchée pendant : {pressedDuration} secondes.")
+                chronoClock.Stop()
+            End If
+        End If
+    End Sub
+
+
+
+    ' Méthode pour gérer les entrées utilisateur dans la boucle de simulation
+    Private Sub HandleInput(deltaTime As Single)
+        If isSelecting OrElse voituresSelectionne Is Nothing Then Return
+
+        Dim accelle As Double = 0
+        Dim accelPourcent As Double = 0
+
+        ' Vérifier les touches numériques enfoncées
+        For i As Integer = 0 To 9
+            If isPressed(i) Then
+                accelPourcent = (i + 1) / 10
+                If i = 9 Then accelPourcent = 1.0 ' Touche 0 = 100%
+                Exit For
+            End If
+        Next
+
+        If isPressed(10) Then accelPourcent = 1.0 ' Touche A = 100%
+
+        ' Accélération (Espace enfoncé)
+        If spacePressed Then
+            If voituresSelectionne.NiveauEssence > 0 Then
+                accelle = voituresSelectionne.Accel * accelPourcent
+                voituresSelectionne.Acceleration(deltaTime, accelPourcent)
+                voituresSelectionne.ConsommerEssence(deltaTime, accelPourcent)
+            End If
+        End If
+
+        ' Décélération (Ctrl enfoncé)
+        If controlPressed Then
+            If voituresSelectionne.Vitesse > 0 AndAlso voituresSelectionne.NiveauEssence > 0 Then
+                voituresSelectionne.Decceleration(deltaTime, accelPourcent)
+            End If
+        End If
+
+        ' Calculer la distance parcourue
+        voituresSelectionne.CalculDistanceParcouru(deltaTime, accelle)
+    End Sub
+
+    Private Sub Panel2_Paint(sender As Object, e As PaintEventArgs) Handles Panel2.Paint
+
+    End Sub
+
+    ' Méthode pour le bouton Replay
+    'Private Sub ReplayButton_Click(sender As Object, e As EventArgs)
+    '    If voituresSelectionne IsNot Nothing Then
+    '        Console.WriteLine("Lancement du replay pour la voiture sélectionnée.")
+    '        Replay()
+    '    End If
+    'End Sub
+
+    '' Méthode de replay similaire à celle du code C++
+    'Private Sub Replay()
+    '    If voituresSelectionne Is Nothing Then
+    '        Console.WriteLine("Aucune voiture sélectionnée pour le replay.")
+    '        Return
+    '    End If
+
+    '    Dim historique As List(Of Acceleration_Log) = Acceleration_Log.GetAllActionForVoiture(conn, voituresSelectionne)
+    '    If historique.Count = 0 Then
+    '        Console.WriteLine("Aucune donnée d'accélération pour cette voiture.")
+    '        Return
+    '    End If
+
+    '    Dim fixedTimeStep As Single = 0.016F ' ~60 FPS
+
+    '    For i As Integer = 0 To historique.Count - 2 Step 2
+    '        If i + 1 >= historique.Count Then Exit For
+
+    '        Dim current As Acceleration_Log = historique(i)
+    '        Dim nexti As Acceleration_Log = historique(i + 1)
+
+    '        ' Parser les heures (format HH:MM:SS.sss)
+    '        Dim time1 As DateTime = DateTime.Parse(current.HeureAcceleration)
+    '        Dim time2 As DateTime = DateTime.Parse(nexti.HeureAcceleration)
+    '        Dim elapsed_seconds As Single = CSng((time2 - time1).TotalSeconds)
+
+    '        If elapsed_seconds <= 0 Then Continue For
+
+    '        Dim vitesseInitiale As Double = current.VitesseInitiale
+    '        Dim vitesseFinaleDB As Double = nexti.VitesseInitiale
+    '        Dim acceleration As Double = current.Acceleration
+    '        Dim pourcent As Double = voituresSelectionne.GetFiryPourcent(acceleration)
+
+    '        voituresSelectionne.Vitesse = vitesseInitiale
+
+    '        Console.WriteLine($"Début à {current.HeureAcceleration}")
+    '        Console.WriteLine($"Vitesse initiale: {voituresSelectionne.Vitesse} km/h")
+    '        Console.WriteLine($"Accélération: {acceleration} km/h/s")
+    '        Console.WriteLine($"Durée de l'action : {elapsed_seconds} secondes")
+    '        Console.WriteLine($"Pourcentage d'accélération : {pourcent}")
+
+    '        Dim timeAccumulator As Single = 0.0F
+    '        Dim vitesseCalculee As Double = 0.0
+
+    '        While timeAccumulator < elapsed_seconds
+    '            Dim remainingTime As Single = elapsed_seconds - timeAccumulator
+    '            Dim stepTime As Single = Math.Min(fixedTimeStep, remainingTime)
+
+    '            If acceleration > 0 Then
+    '                voituresSelectionne.Acceleration(stepTime, pourcent)
+    '                voituresSelectionne.ConsommerEssence(stepTime, pourcent)
+    '            Else
+    '                voituresSelectionne.Decceleration(stepTime, -pourcent)
+    '            End If
+
+    '            voituresSelectionne.CalculDistanceParcouru(stepTime, voituresSelectionne.Accel * pourcent)
+
+    '            timeAccumulator += stepTime
+
+    '            ' Mise à jour de l'interface
+    '            UpdateUI()
+    '            Application.DoEvents() ' Permet à l'interface de se mettre à jour
+
+    '            Console.WriteLine($"Temps: {timeAccumulator}s - Vitesse: {voituresSelectionne.Vitesse} km/h")
+
+    '            ' Pause pour simuler le temps réel
+    '            Thread.Sleep(CInt(stepTime * 1000))
+    '        End While
+
+    '        vitesseCalculee = voituresSelectionne.Vitesse
+
+    '        Console.WriteLine($"Fin à {nexti.HeureAcceleration}")
+    '        Console.WriteLine($"Vitesse calculée: {vitesseCalculee} km/h")
+    '        Console.WriteLine($"Vitesse en base: {vitesseFinaleDB} km/h")
+    '        Console.WriteLine($"Distance parcourue : {voituresSelectionne.DistanceParcourue} m")
+
+    '        UpdateUI()
+    '        Application.DoEvents()
+
+    '        ' Attente avant le prochain segment (optionnel)
+    '        If i + 2 < historique.Count Then
+    '            Dim nextSegment As Acceleration_Log = historique(i + 2)
+    '            Dim nextTime As DateTime = DateTime.Parse(nextSegment.HeureAcceleration)
+    '            Dim delayToNext As Single = CSng((nextTime - time2).TotalSeconds)
+
+    '            If delayToNext > 0 Then
+    '                Console.WriteLine($"Attente avant le prochain segment : {delayToNext} secondes")
+    '                Thread.Sleep(CInt(delayToNext * 1000))
+    '            End If
+    '        End If
+    '    Next
+
+    '    ' Calcul de la consommation moyenne
+    '    Dim consoMoyenne As Double = Acceleration_Log.CalculerConsoMoyenne(conn, voituresSelectionne)
+    '    Console.WriteLine($"La consommation moyenne de la voiture {voituresSelectionne.Id} est de {consoMoyenne} L/100 km")
+    '    MessageBox.Show($"La consommation moyenne de la voiture {voituresSelectionne.Id} est de {consoMoyenne} L/100 km")
+    'End Sub
+End Class
